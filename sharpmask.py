@@ -168,7 +168,8 @@ class SharpMask(resnet_model.Model):
                                                       [refinement_out.shape[1] * 2, refinement_out.shape[2] * 2])
             self.refinement_prediction = tf.squeeze(refinement_out, axis=3)
 
-        self.sess.run(tf.variables_initializer(tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope='refinement')))
+        self.sess.run(
+            tf.variables_initializer(tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope='refinement')))
 
         with tf.variable_scope("metrics"):
             score_metric_prediction = tf.where(self.score_predictions > 0.0,
@@ -188,6 +189,7 @@ class SharpMask(resnet_model.Model):
         self.saver = tf.train.Saver()
 
     def restore(self):
+        print('Restoring from checkpoint file {}'.format(self.checkpoint_file))
         self.saver.restore(self.sess, self.checkpoint_file)
 
     def _create_dataset(self, data_path, batch_size):
@@ -209,6 +211,8 @@ class SharpMask(resnet_model.Model):
         return score_loss, segmentation_loss
 
     def fit_sharpmask(self, epochs=75, lr=0.001, weight_decay=0.00005):
+        print('Fit SharpMask model with parameters: '
+              'epochs {}, initial learning rate {}, weight_decay {}'.format(epochs, lr, weight_decay))
         with tf.variable_scope("sharpmask_training"):
             _, segmentation_loss = self.binary_regression_loss()
 
@@ -231,14 +235,17 @@ class SharpMask(resnet_model.Model):
 
         print('Sharp mask fit cycle completed')
 
-    def run_validation(self, progress_ops_dict, metric_update_ops, validation_steps_count=None):
-        if progress_ops_dict is not None:
-            progress_ops_names, progress_ops = zip(*progress_ops_dict.items())
-            progress_ops = list(progress_ops)
-        else:
-            progress_ops_names = ['segmentation_iou', 'score_accuracy']
-            progress_ops = [self.seg_iou_metric, self.score_accuracy_metric]
-            metric_update_ops = [self.seg_iou_update, self.score_accuracy_update]
+    def deepmask_validation(self, progress_ops_dict, metric_update_ops, validation_steps_count=None):
+        self._run_validation({'segmentation_iou': self.seg_iou_metric, 'score_accuracy': self.score_accuracy_metric},
+                             metric_update_ops=[self.seg_iou_update, self.score_accuracy_update])
+
+    def sharpmask_validation(self, progress_ops_dict, metric_update_ops, validation_steps_count=None):
+        self._run_validation({'segmentation_iou': self.seg_iou_metric},
+                             metric_update_ops=[self.seg_iou_update])
+
+    def _run_validation(self, progress_ops_dict, metric_update_ops, validation_steps_count=None):
+        progress_ops_names, progress_ops = zip(*progress_ops_dict.items())
+        progress_ops = list(progress_ops)
 
         validation_ops = metric_update_ops + progress_ops
 
@@ -305,11 +312,15 @@ class SharpMask(resnet_model.Model):
                 "----- Epoch {} finished in {} -- {}. {}".format(e + 1, toc - tic, training_report, validation_report))
 
     def fit_deepmask(self, epochs=300, lr=0.001, score_factor=1.0 / 32, weight_decay=0.00005):
+        print('Fit DeepMask model with parameters: '
+              'epochs {}, initial learning rate {}, score factor {}, weight_decay {}'.format(epochs, lr, score_factor,
+                                                                                             weight_decay))
         with tf.variable_scope("deepmask_training"):
             score_loss, segmentation_loss = self.binary_regression_loss(score_factor=score_factor)
 
             global_step = tf.Variable(initial_value=0.0)
-            lr_var = tf.train.inverse_time_decay(lr, global_step, 1, weight_decay)#lr / (1.0 + weight_decay * global_step)#
+            lr_var = tf.train.inverse_time_decay(lr, global_step, 1,
+                                                 weight_decay)  # lr / (1.0 + weight_decay * global_step)#
             segmentation_opt = tf.train.MomentumOptimizer(learning_rate=lr_var, momentum=0.9, use_nesterov=True)
             segmentation_gvs = segmentation_opt.compute_gradients(segmentation_loss)
             # gradients, variables = zip(*segmentation_gvs)
