@@ -87,10 +87,9 @@ class SharpMask(resnet_model.Model):
 
         self.resnet_output = self(self.it_next['image'], False)
 
-        self.saver = tf.train.Saver()
-
         if resnet_ckpt is not None:
-            self.saver.restore(self.sess, resnet_ckpt)
+            saver = tf.train.Saver()
+            saver.restore(self.sess, resnet_ckpt)
 
         self.block_layers = [self.sess.graph.get_tensor_by_name("resnet_model/block_layer{}:0".format(i + 1)) for i in
                              range(4)]
@@ -186,6 +185,8 @@ class SharpMask(resnet_model.Model):
             seg_mask = tf.where(seg_mask > 0, tf.ones_like(seg_mask), tf.zeros_like(seg_mask))
             self.seg_iou_metric, self.seg_iou_update = tf.metrics.mean_iou(seg_mask, seg_metric_prediction, 2)
 
+        self.saver = tf.train.Saver()
+
     def restore(self):
         self.saver.restore(self.sess, self.checkpoint_file)
 
@@ -207,7 +208,7 @@ class SharpMask(resnet_model.Model):
         score_loss = tf.reduce_mean(tf.log(1.0 + tf.exp(-score_target * self.score_predictions))) * score_factor
         return score_loss, segmentation_loss
 
-    def fit_sharpmask(self, epochs=300, lr=0.001, weight_decay=0.00005):
+    def fit_sharpmask(self, epochs=75, lr=0.001, weight_decay=0.00005):
         with tf.variable_scope("sharpmask_training"):
             _, segmentation_loss = self.binary_regression_loss()
 
@@ -222,7 +223,7 @@ class SharpMask(resnet_model.Model):
         self.sess.run(
             tf.variables_initializer(tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope='sharpmask_training')))
 
-        self._fit_cycle(epochs,
+        self._fit_cycle(epochs, lr_var,
                         progress_ops_dict={'segmentation_loss': segmentation_loss,
                                            'segmentation_iou': self.seg_iou_metric},
                         opt_ops=[segmentation_opt_op],
@@ -263,7 +264,7 @@ class SharpMask(resnet_model.Model):
 
         return result
 
-    def _fit_cycle(self, epochs, progress_ops_dict, opt_ops, metric_update_ops):
+    def _fit_cycle(self, epochs, lr_var, progress_ops_dict, opt_ops, metric_update_ops):
         progress_ops_names, progress_ops = zip(*progress_ops_dict.items())
         training_ops = opt_ops + metric_update_ops + list(progress_ops)
 
@@ -272,11 +273,10 @@ class SharpMask(resnet_model.Model):
 
         for e in range(epochs):
             tic = datetime.datetime.now()
-            self.sess.run(tf.local_variables_initializer())
-            self.sess.run(self.training_init_op)
+            lr = self.sess.run([lr_var, self.training_init_op, tf.local_variables_initializer()])[0]
 
             print()
-            tqdm.write("----- Epoch {}/{} ;  -----".format(e + 1, epochs))
+            tqdm.write("----- Epoch {}/{} ; learning rate {} -----".format(e + 1, epochs, lr))
             pbar = tqdm(total=train_steps_per_epoch, desc='Training', file=sys.stdout)
             train_steps_per_epoch = 0
 
@@ -302,17 +302,20 @@ class SharpMask(resnet_model.Model):
             gc.collect()
             toc = datetime.datetime.now()
             tqdm.write(
-                "----- Epoch {} finished in {} -- {}. {}".format(e, toc - tic, training_report, validation_report))
+                "----- Epoch {} finished in {} -- {}. {}".format(e + 1, toc - tic, training_report, validation_report))
 
     def fit_deepmask(self, epochs=300, lr=0.001, score_factor=1.0 / 32, weight_decay=0.00005):
         with tf.variable_scope("deepmask_training"):
-            score_loss, segmentation_loss = self.binary_regression_loss()
+            score_loss, segmentation_loss = self.binary_regression_loss(score_factor=score_factor)
 
             global_step = tf.Variable(initial_value=0.0)
-            lr_var = lr / (1.0 + weight_decay * global_step)
+            lr_var = tf.train.inverse_time_decay(lr, global_step, 1, weight_decay)#lr / (1.0 + weight_decay * global_step)#
             segmentation_opt = tf.train.MomentumOptimizer(learning_rate=lr_var, momentum=0.9, use_nesterov=True)
             segmentation_gvs = segmentation_opt.compute_gradients(segmentation_loss)
-            segmentation_opt_op = segmentation_opt.apply_gradients([(tf.clip_by_value(g, -5.0, 5.0)
+            # gradients, variables = zip(*segmentation_gvs)
+            # gradients, _ = tf.clip_by_global_norm(gradients, 5.0)
+            # segmentation_opt_op = segmentation_opt.apply_gradients(zip(gradients, variables))
+            segmentation_opt_op = segmentation_opt.apply_gradients([(tf.clip_by_value(g, -1.0, 1.0)
                                                                      if g is not None else g, v)
                                                                     for g, v in segmentation_gvs],
                                                                    global_step=global_step)
@@ -321,12 +324,12 @@ class SharpMask(resnet_model.Model):
             score_gvs = score_opt.compute_gradients(score_loss, tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES,
                                                                                   scope='score_branch'))
             score_opt_op = score_opt.apply_gradients(
-                [(tf.clip_by_value(g, -5.0, 5.0) if g is not None else g, v) for g, v in score_gvs])
+                [(tf.clip_by_value(g, -1.0, 1.0) if g is not None else g, v) for g, v in score_gvs])
 
         self.sess.run(
             tf.variables_initializer(tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope='deepmask_training')))
 
-        self._fit_cycle(epochs,
+        self._fit_cycle(epochs, lr_var,
                         progress_ops_dict={'segmentation_loss': segmentation_loss, 'score_loss': score_loss,
                                            'segmentation_iou': self.seg_iou_metric,
                                            'score_accuracy': self.score_accuracy_metric},
@@ -396,7 +399,7 @@ def main(eval=False):
                        checkpoint_path="E:/data/ml/coco/sm_dump")
         # dm = SharpMask(train_path='D:/data/coco/tfrecord_val_224', validation_path='D:/data/coco/tfrecord_val_224',
         #               resnet_ckpt="D:\\data\\coco\\resnet_chk\\model.ckpt-250200", summary_path="./summary", checkpoint_path="D:/data/coco/sm_dump")
-        # dm.restore()
+        dm.restore()
         # dm.eval_resnet('test_images/bear.jpg')
 
         dm.fit_deepmask()
