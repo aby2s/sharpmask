@@ -4,12 +4,14 @@ import numpy as np
 import tensorflow as tf
 from pycocotools.coco import COCO
 from tqdm import tqdm
-import skimage.io as io
 import sys
 import os
+import argparse
+
 
 def _int_feature(value):
     return tf.train.Feature(int64_list=tf.train.Int64List(value=[value]))
+
 
 # _bytes is used for string/char values
 
@@ -18,7 +20,7 @@ def _bytes_feature(value):
 
 
 class RecordCreator(object):
-    def __init__(self, data_path, max_file_size = 150000):
+    def __init__(self, data_path, max_file_size=150000):
         self.data_path = data_path
         self.max_file_size = max_file_size
 
@@ -40,8 +42,8 @@ class RecordCreator(object):
 
         for i, id in enumerate(imgIds):
             img = coco.loadImgs(id)[0]
-            if int((i+1) % self.max_file_size) == 0:
-                tfrecord_id +=1
+            if int((i + 1) % self.max_file_size) == 0:
+                tfrecord_id += 1
                 tfrecord_file = file_pattern.format(tfrecord_id)
                 tqdm.write('Creating new tfrecord file id {}, name {}'.format(tfrecord_id, tfrecord_file))
                 writer = tf.python_io.TFRecordWriter(tfrecord_file)
@@ -51,31 +53,31 @@ class RecordCreator(object):
             # I = cv2.resize(I, (224, 224)).astype(np.float32)
             #
             # if I.shape == (224, 224, 3):
-                # I = np.vectorize(lambda x: 256 - x)(I)
-                # I[:, :, 0] -= 103.939
-                # I[:, :, 1] -= 116.779
-                # I[:, :, 2] -= 123.68
+            # I = np.vectorize(lambda x: 256 - x)(I)
+            # I[:, :, 0] -= 103.939
+            # I[:, :, 1] -= 116.779
+            # I[:, :, 2] -= 123.68
 
             annIds = coco.getAnnIds(imgIds=[id], iscrowd=0)
             anns = coco.loadAnns(annIds)
             for ann in anns:
-                    mask = Image.new('F', (img['width'], img['height']), color=-1)
-                    segs = list(zip(*[iter(ann['segmentation'][0])]*2))
-                    ImageDraw.Draw(mask).polygon(segs, outline=1, fill=1)
-                    mask = np.asarray(mask)
-                    mask = cv2.resize(mask, (224, 224))
-                    score = self.get_score(mask)
-                    #mask = cv2.resize(mask, (56, 56))
-                    mask = np.where(mask == -1.0, -1, 1).astype(np.int8)
-                    if score > 0:
-                        feature = {'score': _int_feature(score),
-                                   'image': _bytes_feature(im_path.encode()),
+                mask = Image.new('F', (img['width'], img['height']), color=-1)
+                segs = list(zip(*[iter(ann['segmentation'][0])] * 2))
+                ImageDraw.Draw(mask).polygon(segs, outline=1, fill=1)
+                mask = np.asarray(mask)
+                mask = cv2.resize(mask, (224, 224))
+                score = self.get_score(mask)
+                # mask = cv2.resize(mask, (56, 56))
+                mask = np.where(mask == -1.0, -1, 1).astype(np.int8)
+                if score > 0:
+                    feature = {'score': _int_feature(score),
+                               'image': _bytes_feature(im_path.encode()),
                                'mask': _bytes_feature(mask.tostring())}
-                        example = tf.train.Example(features=tf.train.Features(feature=feature))
-                        writer.write(example.SerializeToString())
-                        total_samples += 1
-                        balance += score
-                        break
+                    example = tf.train.Example(features=tf.train.Features(feature=feature))
+                    writer.write(example.SerializeToString())
+                    total_samples += 1
+                    balance += score
+                    break
 
             if score < 0 and balance > 0:
                 feature = {'score': _int_feature(score),
@@ -86,7 +88,8 @@ class RecordCreator(object):
                 total_samples += 1
                 balance += score
             pbar.update()
-            pbar.set_description('Creating record file (total samples created={}, balance={})'.format(total_samples, balance))
+            pbar.set_description(
+                'Creating record file (total samples created={}, balance={})'.format(total_samples, balance))
 
         tqdm.write('tfrecord file created, total samples {}, balance {}'.format(total_samples, balance))
 
@@ -126,28 +129,24 @@ class RecordCreator(object):
                 break
         return isNotTooLarge
 
-def main(**kwargs):
 
-    rc = RecordCreator(data_path='E:/data/ml/coco')
+def main():
+    parser = argparse.ArgumentParser(
+        description='Use this util to prepare tfrecord files before training DeepMask/SharpMask')
 
-    print('Creating validation data')
-    rc.create_data('E:/data/ml/coco/tfrecord_val_224/', 'val2017')
+    parser.add_argument('--coco_path', action='store', dest='coco_path', help='A path to downloaded and unzipped coco dataset', required=True)
+    parser.add_argument('--train_path', action="store", dest="train_path", help='A path to folder where to put train set tfrecord files', required=True)
+    parser.add_argument('--validation_path', action="store", dest="validation_path", help='A path to folder where to put validation set tfrecord files', required=True)
+    parser.add_argument('--max_per_file', action="store", dest="max_per_file", type=int, default=150000, help='Max number of samples per single tfrecord file')
 
-    print('Creating train data')
-    rc.create_data('E:/data/ml/coco/tfrecord_224/', 'train2017')
+    params = parser.parse_args(sys.argv[1:])
+    rc = RecordCreator(data_path=params.coco_path)
+    print('Preparing validation data')
+    rc.create_data(params.validation_path, 'val2017')
 
-    # rc = RecordCreator(data_path='D:/data/coco')
-    #
-    # print('Creating validation data')
-    # rc.create_data('D:/data/coco/tfrecord_val_224/', 'val2017')
-    #
-    # print('Creating train data')
-    # rc.create_data('E:/data/ml/coco/tfrecord_224/', 'train2017')
-
-
-    #
-    #rc.create_data('D:/data/coco/tfrecord_train_224/', 'train2017')
+    print('Preparing train data')
+    rc.create_data(params.train_path, 'train2017')
 
 
 if __name__ == "__main__":
-        sys.exit(main())
+    sys.exit(main())
