@@ -294,8 +294,8 @@ class SharpMask(resnet_model.Model):
         seg_mask = tf.where(seg_mask > 0, tf.ones_like(seg_mask), tf.zeros_like(seg_mask))
         return tf.metrics.mean_iou(seg_mask, seg_metric_prediction, 2)
 
-    def _eval_prediction(self, eval_source, eval_target, seg_predictions, threshold = 0.0):
-        self.sess.run([self.placeholder_init_op], feed_dict={self.image_placeholder: eval_source})
+    def _eval_prediction(self, eval_source, eval_target, seg_predictions, threshold = -10.0):
+        self.sess.run([self.placeholder_init_op], feed_dict={self.image_placeholder: eval_source, self.training_mode: False})
         score_predictions, seg_predictions = self.sess.run([self.score_predictions, seg_predictions])
 
         print('Predicted score is {}'.format(score_predictions[0]))
