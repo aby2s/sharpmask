@@ -7,22 +7,25 @@ def main():
     parser = argparse.ArgumentParser(
         description='DeepMask/SharpMask TensorFlow implementation')
 
-    parser.add_argument('--train', action="store", dest="train",
-                        help='Train deepmask core, sharpmask refinement or all for sequential training of both',
-                        choices=['all', 'deepmask', 'sharpmask'], required=False)
-
-    parser.add_argument('--validate', action="store", dest="validate",
-                        help='Run explicit validation of either deepmask or sharpmask '
-                             'on validation set provided in validation_path',
-                        choices=['deepmask', 'sharpmask'], required=False)
-
-    parser.add_argument('--evaluate', action="store", dest="evaluate",
-                        help='Evaluate either deepmask or sharpmask',
-                        #default='sharpmask',
-                        choices=['deepmask', 'sharpmask'], required=False)
+    parser.add_argument('--model', action="store", dest="model", default='all',
+                        choices=['all', 'deepmask', 'sharpmask'],
+                        help='The model: deepmask, sharpmask or both',
+                        required=False)
 
     parser.add_argument('--restore', action="store_true", dest="restore",
-                        help='Restore model from checkpoint', required=False, default=False)
+                        help='Restore model from checkpoint', required=False)
+
+    parser.add_argument('--train', action="store_true", dest="train",
+                        help='Run the model training. For sharpmask model only refinement layers training is performed.',
+                        required=False)
+
+    parser.add_argument('--validate', action="store_true", dest="validate",
+                        help='Run explicit validation of selected model on validation set provided in the validation_path argument',
+                        required=False)
+
+    parser.add_argument('--evaluate', action="store_true", dest="evaluate",
+                        help='Evaluate the model applying mask on an image provided by the eval_source argument',
+                        required=False)
 
     parser.add_argument('--train_path', action="store", dest="train_path",
                         help='A path to folder containing train set tfrecord files', required=False)
@@ -49,28 +52,36 @@ def main():
     params = parser.parse_args(sys.argv[1:])
     print(params)
 
-    if params.train is None and params.validate is None and params.evaluate is None:
-        print('To run the model at least one option from train, validate or evaluate should be present.')
+    if not (params.train or params.validate or params.evaluate):
+        print('To run the model at least one option from train, validate or evaluate should be chosen.',
+              file=sys.stderr)
         parser.print_help(sys.stderr)
         sys.exit(-1)
 
     model = SharpMask(train_path=params.train_path, validation_path=params.validation_path,
-        resnet_ckpt=params.resnet_ckpt, summary_path=params.summary_path, checkpoint_path=params.checkpoint_path)
+                      resnet_ckpt=params.resnet_ckpt, summary_path=params.summary_path,
+                      checkpoint_path=params.checkpoint_path)
 
     if params.restore:
         model.restore()
 
-    if params.train == 'deepmask' or params.train == 'all':
-        model.fit_deepmask()
+    if params.train:
+        if params.model == 'deepmask' or params.train == 'all':
+            model.fit_deepmask()
+        if params.model == 'sharpmask' or params.model == 'all':
+            model.fit_sharpmask()
 
-    if params.train == 'sharpmask' or params.train == 'all':
-        model.fit_sharpmask()
-        
-    if params.validate == 'deepmask':
-        model.deepmask_validation()
-        
-    if params.validate == 'sharpmask':
-        model.sharpmask_validation()
+    if params.validate:
+        if params.model == 'deepmask':
+            model.deepmask_validation()
+        if params.model == 'sharpmask':
+            model.sharpmask_validation()
+
+    if params.evaluate:
+        if params.model == 'deepmask':
+            model.eval(params.eval_source)
+        if params.model == 'sharpmask':
+            model.eval(params.eval_source)
 
     # if eval:
     #     # dm = SharpMask(train_path='D:/data/coco/tfrecord', validation_path='D:/data/coco/tfrecord_val',

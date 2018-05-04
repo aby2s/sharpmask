@@ -69,8 +69,13 @@ class SharpMask(resnet_model.Model):
 
         self.train_ds = self._create_dataset(train_path, batch_size)
         self.validation_ds = self._create_dataset(validation_path, batch_size)
-        self.iterator = tf.data.Iterator.from_structure(self.train_ds.output_types,
-                                                        self.train_ds.output_shapes)
+        output_types = {'score': tf.float32, 'mask': tf.int8, 'image': tf.float32}
+        output_shapes = {'score': tf.TensorShape([None]), 'mask': tf.TensorShape([None, 224, 224]), 'image': tf.TensorShape([None, 224, 224, 3])}
+        # self.iterator = tf.data.Iterator.from_structure(self.train_ds.output_types,
+        #                                                 self.train_ds.output_shapes)
+
+        self.iterator = tf.data.Iterator.from_structure(output_types, output_shapes)
+
 
         self.training_init_op = self.iterator.make_initializer(self.train_ds)
         self.validation_init_op = self.iterator.make_initializer(self.validation_ds)
@@ -235,11 +240,11 @@ class SharpMask(resnet_model.Model):
 
         print('Sharp mask fit cycle completed')
 
-    def deepmask_validation(self, progress_ops_dict, metric_update_ops, validation_steps_count=None):
+    def deepmask_validation(self):
         self._run_validation({'segmentation_iou': self.seg_iou_metric, 'score_accuracy': self.score_accuracy_metric},
                              metric_update_ops=[self.seg_iou_update, self.score_accuracy_update])
 
-    def sharpmask_validation(self, progress_ops_dict, metric_update_ops, validation_steps_count=None):
+    def sharpmask_validation(self):
         self._run_validation({'segmentation_iou': self.seg_iou_metric},
                              metric_update_ops=[self.seg_iou_update])
 
