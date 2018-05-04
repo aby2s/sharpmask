@@ -5,10 +5,10 @@ import tensorflow as tf
 import skimage.io as io
 import numpy as np
 from tqdm import tqdm
-
+import itertools
 import resnet_model
 from im_classes import IM_CLASSES
-from PIL import Image, ImageDraw
+from PIL import Image
 import cv2
 import sys
 import glob
@@ -218,10 +218,10 @@ class SharpMask(resnet_model.Model):
                                                                          score_factor=score_factor)
 
             global_step = tf.Variable(initial_value=0.0)
-            lr_var = tf.train.inverse_time_decay(lr, global_step, 1,
-                                                 weight_decay)  # lr / (1.0 + weight_decay * global_step)#
+            lr_var = lr  # f.train.inverse_time_decay(lr, global_step, 1,weight_decay)  # lr / (1.0 + weight_decay * global_step)#
+            weight_loss = self._weight_decay(weight_decay)
             segmentation_opt = tf.train.MomentumOptimizer(learning_rate=lr_var, momentum=0.9, use_nesterov=True)
-            segmentation_gvs = segmentation_opt.compute_gradients(segmentation_loss)
+            segmentation_gvs = segmentation_opt.compute_gradients(segmentation_loss + weight_loss)
             # gradients, variables = zip(*segmentation_gvs)
             # gradients, _ = tf.clip_by_global_norm(gradients, 5.0)
             # segmentation_opt_op = segmentation_opt.apply_gradients(zip(gradients, variables))
@@ -294,8 +294,9 @@ class SharpMask(resnet_model.Model):
         seg_mask = tf.where(seg_mask > 0, tf.ones_like(seg_mask), tf.zeros_like(seg_mask))
         return tf.metrics.mean_iou(seg_mask, seg_metric_prediction, 2)
 
-    def _eval_prediction(self, eval_source, eval_target, seg_predictions, threshold = -10.0):
-        self.sess.run([self.placeholder_init_op], feed_dict={self.image_placeholder: eval_source, self.training_mode: False})
+    def _eval_prediction(self, eval_source, eval_target, seg_predictions, threshold=-10.0):
+        self.sess.run([self.placeholder_init_op],
+                      feed_dict={self.image_placeholder: eval_source, self.training_mode: False})
         score_predictions, seg_predictions = self.sess.run([self.score_predictions, seg_predictions])
 
         print('Predicted score is {}'.format(score_predictions[0]))
@@ -337,6 +338,14 @@ class SharpMask(resnet_model.Model):
         score_loss = tf.reduce_mean(tf.log(1.0 + tf.exp(-self.score_target * self.score_predictions))) * score_factor
         return score_loss, segmentation_loss
 
+    def _weight_decay(self, weight_decay, scopes=['deepmask_trunk', 'segmentation_branch', 'score_branch']):
+        weights = list(itertools.chain(*[tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope=scope) for scope in scopes]))
+        weights = list(filter(lambda x: 'kernel' in x.name, weights))
+        weights_norm = tf.reduce_sum(input_tensor=weight_decay * tf.stack([tf.nn.l2_loss(i) for i in weights]),
+                                     name='weights_norm')
+
+        return weights_norm
+
     def _run_validation(self, progress_ops_dict, metric_update_ops, validation_steps_count=None):
         progress_ops_names, progress_ops = zip(*progress_ops_dict.items())
         progress_ops = list(progress_ops)
@@ -373,10 +382,11 @@ class SharpMask(resnet_model.Model):
 
         for e in range(epochs):
             tic = datetime.datetime.now()
-            lr = self.sess.run([lr_var, self.training_init_op, tf.local_variables_initializer()])[0]
+            #lr = self.sess.run([lr_var, self.training_init_op, tf.local_variables_initializer()])[0]
+            self.sess.run([self.training_init_op, tf.local_variables_initializer()])
 
             print()
-            tqdm.write("----- Epoch {}/{} ; learning rate {} -----".format(e + 1, epochs, lr))
+            tqdm.write("----- Epoch {}/{} ; learning rate {} -----".format(e + 1, epochs, lr_var))
             pbar = tqdm(total=train_steps_per_epoch, desc='Training', file=sys.stdout)
             train_steps_per_epoch = 0
 
