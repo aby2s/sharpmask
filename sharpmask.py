@@ -218,10 +218,12 @@ class SharpMask(resnet_model.Model):
                                                                          score_factor=score_factor)
 
             global_step = tf.Variable(initial_value=0.0)
-            lr_var = lr  # f.train.inverse_time_decay(lr, global_step, 1,weight_decay)  # lr / (1.0 + weight_decay * global_step)#
-            weight_loss = self._weight_decay(weight_decay)
+            lr_var = tf.constant(lr)  # tf.train.inverse_time_decay(lr, global_step, 1,weight_decay)
+            weight_loss, weight_vars = self._weight_decay()
+            weight_decay_opt = tf.train.GradientDescentOptimizer(learning_rate=weight_decay)
+            weight_decay_opt_op = weight_decay_opt.minimize(weight_loss, var_list=weight_vars)
             segmentation_opt = tf.train.MomentumOptimizer(learning_rate=lr_var, momentum=0.9, use_nesterov=True)
-            segmentation_gvs = segmentation_opt.compute_gradients(segmentation_loss + weight_loss)
+            segmentation_gvs = segmentation_opt.compute_gradients(segmentation_loss)
             # gradients, variables = zip(*segmentation_gvs)
             # gradients, _ = tf.clip_by_global_norm(gradients, 5.0)
             # segmentation_opt_op = segmentation_opt.apply_gradients(zip(gradients, variables))
@@ -243,17 +245,20 @@ class SharpMask(resnet_model.Model):
                         progress_ops_dict={'segmentation_loss': segmentation_loss, 'score_loss': score_loss,
                                            'segmentation_iou': self.dm_seg_iou_metric,
                                            'score_accuracy': self.score_accuracy_metric},
-                        opt_ops=[segmentation_opt_op, score_opt_op],
+                        opt_ops=[segmentation_opt_op, score_opt_op, weight_decay_opt_op],
                         metric_update_ops=[self.dm_seg_iou_update, self.score_accuracy_update])
 
         print('Deep mask fit cycle completed')
 
-    def fit_sharpmask(self, epochs=75, lr=0.001, weight_decay=0.00005):
+    def fit_sharpmask(self, epochs=300, lr=0.001, weight_decay=0.00005):
         with tf.variable_scope("sharpmask_training"):
             _, segmentation_loss = self._binary_regression_loss(self.refinement_prediction)
 
             global_step = tf.Variable(initial_value=0)
-            lr_var = tf.train.inverse_time_decay(lr, global_step, 1, weight_decay)
+            lr_var = tf.constant(lr)  # tf.train.inverse_time_decay(lr, global_step, 1,weight_decay)
+            weight_loss, weight_vars = self._weight_decay(scopes=['refinement'])
+            weight_decay_opt = tf.train.GradientDescentOptimizer(learning_rate=weight_decay)
+            weight_decay_opt_op = weight_decay_opt.minimize(weight_loss, var_list=weight_vars)
             segmentation_opt = tf.train.MomentumOptimizer(learning_rate=lr_var, momentum=0.9, use_nesterov=True)
             segmentation_opt_op = segmentation_opt.minimize(segmentation_loss, global_step=global_step,
                                                             var_list=tf.get_collection(
@@ -266,7 +271,7 @@ class SharpMask(resnet_model.Model):
         self._fit_cycle(epochs, lr_var,
                         progress_ops_dict={'segmentation_loss': segmentation_loss,
                                            'segmentation_iou': self.sm_seg_iou_metric},
-                        opt_ops=[segmentation_opt_op],
+                        opt_ops=[segmentation_opt_op, weight_decay_opt_op],
                         metric_update_ops=[self.sm_seg_iou_update])
 
         print('Sharp mask fit cycle completed')
@@ -338,13 +343,13 @@ class SharpMask(resnet_model.Model):
         score_loss = tf.reduce_mean(tf.log(1.0 + tf.exp(-self.score_target * self.score_predictions))) * score_factor
         return score_loss, segmentation_loss
 
-    def _weight_decay(self, weight_decay, scopes=['deepmask_trunk', 'segmentation_branch', 'score_branch']):
+    def _weight_decay(self, scopes=['deepmask_trunk', 'segmentation_branch', 'score_branch']):
         weights = list(itertools.chain(*[tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope=scope) for scope in scopes]))
         weights = list(filter(lambda x: 'kernel' in x.name, weights))
-        weights_norm = tf.reduce_sum(input_tensor=weight_decay * tf.stack([tf.nn.l2_loss(i) for i in weights]),
+        weights_norm = tf.reduce_sum(input_tensor=tf.stack([tf.nn.l2_loss(i) for i in weights]),
                                      name='weights_norm')
 
-        return weights_norm
+        return weights_norm, weights
 
     def _run_validation(self, progress_ops_dict, metric_update_ops, validation_steps_count=None):
         progress_ops_names, progress_ops = zip(*progress_ops_dict.items())
@@ -382,11 +387,10 @@ class SharpMask(resnet_model.Model):
 
         for e in range(epochs):
             tic = datetime.datetime.now()
-            #lr = self.sess.run([lr_var, self.training_init_op, tf.local_variables_initializer()])[0]
-            self.sess.run([self.training_init_op, tf.local_variables_initializer()])
+            lr = self.sess.run([lr_var, self.training_init_op, tf.local_variables_initializer()])[0]
 
             print()
-            tqdm.write("----- Epoch {}/{} ; learning rate {} -----".format(e + 1, epochs, lr_var))
+            tqdm.write("----- Epoch {}/{} ; learning rate {} -----".format(e + 1, epochs, lr))
             pbar = tqdm(total=train_steps_per_epoch, desc='Training', file=sys.stdout)
             train_steps_per_epoch = 0
 
