@@ -50,7 +50,6 @@ def main():
                         help='Target file name for image with applied mask', required=False)
 
     params = parser.parse_args(sys.argv[1:])
-    print(params)
 
     if not (params.train or params.validate or params.evaluate):
         print('To run the model at least one option from train, validate or evaluate should be chosen.',

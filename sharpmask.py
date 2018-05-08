@@ -191,7 +191,9 @@ class SharpMask(resnet_model.Model):
 
             refinement_out = tf.image.resize_bilinear(refinement_out,
                                                       [refinement_out.shape[1] * 2, refinement_out.shape[2] * 2])
-            self.refinement_prediction = tf.squeeze(refinement_out, axis=3)
+            refinement_out = tf.squeeze(refinement_out, axis=3)
+            self.refinement_prediction = self.dm_seg_prediction + refinement_out
+
 
         self.sess.run(
             tf.variables_initializer(tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope='refinement')))
@@ -256,9 +258,9 @@ class SharpMask(resnet_model.Model):
 
             global_step = tf.Variable(initial_value=0)
             lr_var = tf.constant(lr)  # tf.train.inverse_time_decay(lr, global_step, 1,weight_decay)
-            weight_loss, weight_vars = self._weight_decay(scopes=['refinement'])
-            weight_decay_opt = tf.train.GradientDescentOptimizer(learning_rate=weight_decay)
-            weight_decay_opt_op = weight_decay_opt.minimize(weight_loss, var_list=weight_vars)
+            # weight_loss, weight_vars = self._weight_decay(scopes=['refinement'])
+            # weight_decay_opt = tf.train.GradientDescentOptimizer(learning_rate=weight_decay)
+            # weight_decay_opt_op = weight_decay_opt.minimize(weight_loss, var_list=weight_vars)
             segmentation_opt = tf.train.MomentumOptimizer(learning_rate=lr_var, momentum=0.9, use_nesterov=True)
             segmentation_opt_op = segmentation_opt.minimize(segmentation_loss, global_step=global_step,
                                                             var_list=tf.get_collection(
@@ -271,7 +273,7 @@ class SharpMask(resnet_model.Model):
         self._fit_cycle(epochs, lr_var,
                         progress_ops_dict={'segmentation_loss': segmentation_loss,
                                            'segmentation_iou': self.sm_seg_iou_metric},
-                        opt_ops=[segmentation_opt_op, weight_decay_opt_op],
+                        opt_ops=[segmentation_opt_op],
                         metric_update_ops=[self.sm_seg_iou_update])
 
         print('Sharp mask fit cycle completed')
