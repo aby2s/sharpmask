@@ -18,6 +18,7 @@ IMAGENET_MEANS = tf.constant([123.68, 116.779, 103.939], dtype=tf.float32, shape
 
 
 def transform_image(image):
+    #image = tf.string_join([tf.constant('D:/data/coco/images/val2017/'), tf.substr(image, 31, 16)])
     image = tf.image.resize_images(tf.image.decode_jpeg(tf.read_file(image), channels=3, dct_method='INTEGER_ACCURATE'),
                                    size=(224, 224))
     return image - IMAGENET_MEANS
@@ -127,6 +128,7 @@ class SharpMask(resnet_model.Model):
             # trunk = tf.layers.conv2d(self.block_layers[-1], 2048, (1, 1), activation=tf.nn.relu)
             trunk = tf.layers.conv2d(self.block_layers[-1], 512, (1, 1), activation=tf.nn.relu,
                                      data_format=self.data_format)
+            M = trunk
             trunk = tf.layers.flatten(trunk)
             trunk = tf.layers.dense(trunk, 512)
         self.sess.run(
@@ -165,16 +167,18 @@ class SharpMask(resnet_model.Model):
         self.sess.run(
             tf.variables_initializer(tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope='score_branch')))
 
+        self.saver = tf.train.Saver()
+
         with tf.variable_scope("refinement"):
             channel_axis = 1 if self.data_format == "channels_first" else 3
             # height_axis, width_axis = (2, 3) if self.data_format == "channels_first" else (1, 2)
-            M = None
+            #M = None
             for i in range(4, 0, -1):
                 F = self.block_layers[i - 1]
                 S = tf.layers.conv2d(F, int(int(F.shape[channel_axis]) / 2), (3, 3), padding='SAME',
                                      activation=tf.nn.relu, data_format=self.data_format,
                                      name='horizontal_1_{}'.format(i))
-                M = tf.concat((M, S), axis=channel_axis) if M is not None else S
+                M = tf.concat((M, S), axis=channel_axis) #if M is not None else S
                 M = tf.layers.conv2d(M, S.shape[channel_axis], (3, 3), padding='SAME', activation=tf.nn.relu,
                                      data_format=self.data_format, name='horizontal_2_{}'.format(i))
                 if self.data_format == "channels_first":
@@ -209,7 +213,7 @@ class SharpMask(resnet_model.Model):
             self.sm_seg_iou_metric, self.sm_seg_iou_update = self._create_seg_metrics(
                 self.refinement_prediction)
 
-        self.saver = tf.train.Saver()
+
 
     def restore(self):
         self.saver.restore(self.sess, self.checkpoint_file)
