@@ -13,6 +13,9 @@ requires pre-trained ResNet [weights](http://download.tensorflow.org/models/offi
 
 ResNet model implementation is copied from the official TensorFlow [repository](https://github.com/tensorflow/models/tree/master/official/resnet).
 
+Note, that variables in ResNet model checkpoint are explicitly placed on a GPU device. 
+So they won't be restored on a CPU.
+
 Quick start
 ------------
 1. Clone this repository
