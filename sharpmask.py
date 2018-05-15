@@ -5,10 +5,10 @@ import tensorflow as tf
 import skimage.io as io
 import numpy as np
 from tqdm import tqdm
-
+import itertools
 import resnet_model
 from im_classes import IM_CLASSES
-from PIL import Image, ImageDraw
+from PIL import Image
 import cv2
 import sys
 import glob
@@ -33,14 +33,12 @@ def transform_ds(x):
     return {'score': tf.cast(parsed_features['score'], tf.float32), 'mask': masks, 'image': image}
 
 
-def validation_ds(x):
-    return {'score': tf.zeros((1,), dtype=tf.float32), 'mask': tf.zeros((1, 224, 224), dtype=tf.int8),
-            'image': tf.expand_dims(transform_image(x), 0)}
-    # return {'score': tf.zeros((1,), dtype=tf.float32), 'mask': tf.zeros((1,224,224), dtype=tf.int8), 'image': tf.expand_dims(x, 0)}
-
-
 class SharpMask(resnet_model.Model):
-    mask_size = 56
+    mask_size = 224
+    types = {'score': tf.float32, 'mask': tf.int8, 'image': tf.float32}
+    shapes = {'score': tf.TensorShape([None]),
+              'mask': tf.TensorShape([None, mask_size, mask_size]),
+              'image': tf.TensorShape([None, mask_size, mask_size, 3])}
 
     def __init__(self, train_path, validation_path, session=None, resnet_ckpt=None, summary_path=None,
                  checkpoint_path=None, batch_size=32):
@@ -67,15 +65,32 @@ class SharpMask(resnet_model.Model):
         else:
             self.sess = session
 
-        self.train_ds = self._create_dataset(train_path, batch_size)
-        self.validation_ds = self._create_dataset(validation_path, batch_size)
-        self.iterator = tf.data.Iterator.from_structure(self.train_ds.output_types,
-                                                        self.train_ds.output_shapes)
+        it_structure = tf.data.Iterator.from_structure(self.types, self.shapes)
+        self.iterator = it_structure.get_next()
 
-        self.training_init_op = self.iterator.make_initializer(self.train_ds)
-        self.validation_init_op = self.iterator.make_initializer(self.validation_ds)
+        self.image_placeholder = tf.placeholder_with_default("", shape=())
 
-        self.it_next = self.iterator.get_next()
+        self.image_input = self.iterator['image']
+        self.score_target = self.iterator['score']
+        self.seg_target = self.iterator['mask']
+
+        self.score_placeholder = tf.placeholder_with_default([1.0], (1,))
+        self.mask_placeholder = tf.placeholder_with_default(tf.ones((1, self.mask_size, self.mask_size), dtype=tf.int8),
+                                                            (1, self.mask_size, self.mask_size))
+        dummy_ds = tf.data.Dataset.from_tensor_slices(
+            {'image': tf.expand_dims(transform_image(self.image_placeholder), 0),
+             'score': self.score_placeholder, 'mask': self.mask_placeholder}).map(
+            lambda x: {'score': tf.expand_dims(x['score'], 0), 'mask': tf.expand_dims(x['mask'], 0),
+                       'image': tf.expand_dims(x['image'], 0)})
+        self.placeholder_init_op = it_structure.make_initializer(dummy_ds)
+
+        if train_path is not None:
+            self.train_ds = self._create_dataset(train_path, batch_size)
+            self.training_init_op = it_structure.make_initializer(self.train_ds)
+
+        if validation_path is not None:
+            self.validation_ds = self._create_dataset(validation_path, batch_size)
+            self.validation_init_op = it_structure.make_initializer(self.validation_ds)
 
         if summary_path is not None:
             self.summary_writer = tf.summary.FileWriter(summary_path, self.sess.graph)
@@ -85,7 +100,7 @@ class SharpMask(resnet_model.Model):
 
         self.checkpoint_file = os.path.join(checkpoint_path, 'sharpmask.ckpt')
 
-        self.resnet_output = self(self.it_next['image'], False)
+        self.resnet_output = self(self.image_input, False)
 
         if resnet_ckpt is not None:
             saver = tf.train.Saver()
@@ -96,10 +111,7 @@ class SharpMask(resnet_model.Model):
 
         self.training_mode = tf.placeholder_with_default(True, shape=())
 
-        # trunk = self.block_layers[-1]
-
         with tf.variable_scope("deepmask_trunk"):
-            # trunk = tf.layers.conv2d(self.block_layers[-1], 2048, (1, 1), activation=tf.nn.relu)
             trunk = tf.layers.conv2d(self.block_layers[-1], 512, (1, 1), activation=tf.nn.relu,
                                      data_format=self.data_format)
             trunk = tf.layers.flatten(trunk)
@@ -108,16 +120,9 @@ class SharpMask(resnet_model.Model):
             tf.variables_initializer(tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope='deepmask_trunk')))
 
         with tf.variable_scope("segmentation_branch"):
-            seg_predictions = tf.layers.dense(trunk, self.mask_size * self.mask_size)
-            seg_predictions = tf.reshape(seg_predictions, [-1, self.mask_size, self.mask_size, 1])
-            self.seg_predictions = tf.squeeze(tf.image.resize_bilinear(seg_predictions, [224, 224]), 3)
-
-            # seg_predictions = tf.layers.conv2d(trunk, 512, (1, 1), activation=tf.nn.relu, data_format=self.data_format)
-            # seg_predictions = tf.layers.flatten(seg_predictions)
-            # seg_predictions = tf.layers.dense(seg_predictions, 512)
-            # seg_predictions = tf.layers.dense(seg_predictions, self.mask_size * self.mask_size)
-            # seg_predictions = tf.reshape(seg_predictions, [-1, self.mask_size, self.mask_size, 1])
-            # self.seg_predictions = tf.squeeze(tf.image.resize_bilinear(seg_predictions, [224, 224]), 3)
+            seg_predictions = tf.layers.dense(trunk, 56 * 56)
+            seg_predictions = tf.reshape(seg_predictions, [-1, 56, 56, 1])
+            self.dm_seg_prediction = tf.squeeze(tf.image.resize_bilinear(seg_predictions, [224, 224]), 3)
 
         self.sess.run(
             tf.variables_initializer(tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope='segmentation_branch')))
@@ -128,30 +133,38 @@ class SharpMask(resnet_model.Model):
             score_predictions = tf.layers.dropout(score_predictions, rate=0.5, training=self.training_mode)
             self.score_predictions = tf.layers.dense(score_predictions, 1, name='score_out')
 
-            # score_predictions = tf.layers.max_pooling2d(trunk, padding='SAME', pool_size=(2, 2), strides=(2, 2))
-            # score_predictions = tf.layers.flatten(score_predictions)
-            # score_predictions = tf.layers.dense(score_predictions, 512, activation=tf.nn.relu)
-            # score_predictions = tf.layers.dropout(score_predictions, rate=0.5, training=self.training_mode)
-            #
-            # score_predictions = tf.layers.dense(score_predictions, 1024, activation=tf.nn.relu)
-            # score_predictions = tf.layers.dropout(score_predictions, rate=0.5, training=self.training_mode)
-            # self.score_predictions = tf.layers.dense(score_predictions, 1, name='score_out')
-
         self.sess.run(
             tf.variables_initializer(tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope='score_branch')))
 
+        #self.saver = tf.train.Saver()
+
+        k = 32
         with tf.variable_scope("refinement"):
-            channel_axis = 1 if self.data_format == "channels_first" else 3
-            # height_axis, width_axis = (2, 3) if self.data_format == "channels_first" else (1, 2)
-            M = None
-            for i in range(4, 0, -1):
-                F = self.block_layers[i - 1]
-                S = tf.layers.conv2d(F, int(int(F.shape[channel_axis]) / 2), (3, 3), padding='SAME',
+            M = tf.layers.dense(trunk, k*7*7, name='vertical_0')
+            M = tf.reshape(M, [-1, k, 7, 7]) if self.data_format == "channels_first" else tf.reshape(M, [-1, 7, 7, k])
+
+            for i in range(1, 5):
+                ki = int(k/2**(i-1))
+                knext = int(ki/2)
+
+                F = self.block_layers[4-i]
+                S = tf.layers.conv2d(F, 64 if i < 4 else 32, (3, 3), padding='SAME',
                                      activation=tf.nn.relu, data_format=self.data_format,
-                                     name='horizontal_1_{}'.format(i))
-                M = tf.concat((M, S), axis=channel_axis) if M is not None else S
-                M = tf.layers.conv2d(M, S.shape[channel_axis], (3, 3), padding='SAME', activation=tf.nn.relu,
-                                     data_format=self.data_format, name='horizontal_2_{}'.format(i))
+                                     name='horizontal_{}_64'.format(i))
+
+                S = tf.layers.conv2d(S, ki, (3, 3), padding='SAME',
+                                     activation=tf.nn.relu, data_format=self.data_format,
+                                     name='horizontal_{}_{}'.format(i, ki))
+                S = tf.layers.conv2d(S, knext, (3, 3), padding='SAME', data_format=self.data_format,
+                                     name='horizontal_{}_{}'.format(i, knext))
+
+                M = tf.layers.conv2d(M, k/2**(i-1), (3, 3), padding='SAME',
+                                     activation=tf.nn.relu, data_format=self.data_format,
+                                     name='vertical_{}_{}'.format(i, ki))
+                M = tf.layers.conv2d(M, knext, (3, 3), padding='SAME', data_format=self.data_format,
+                                     name='vertical_{}_{}'.format(i, knext))
+
+                M = tf.nn.relu(S + M)
                 if self.data_format == "channels_first":
                     M = tf.transpose(M, perm=[0, 2, 3, 1])
                     M = tf.image.resize_bilinear(M, [M.shape[1] * 2, M.shape[2] * 2])
@@ -159,36 +172,133 @@ class SharpMask(resnet_model.Model):
                 else:
                     M = tf.image.resize_bilinear(M, [M.shape[1] * 2, M.shape[2] * 2])
 
-            refinement_out = tf.layers.conv2d(M, 1, (3, 3), padding='SAME', activation=tf.nn.relu,
-                                              data_format=self.data_format, name='final_refinement')
+            refinement_out = tf.layers.conv2d(M, 1, (3, 3), padding='SAME',
+                                              data_format=self.data_format, name='refinement_out')
             if self.data_format == "channels_first":
                 refinement_out = tf.transpose(refinement_out, perm=[0, 2, 3, 1])
 
             refinement_out = tf.image.resize_bilinear(refinement_out,
                                                       [refinement_out.shape[1] * 2, refinement_out.shape[2] * 2])
-            self.refinement_prediction = tf.squeeze(refinement_out, axis=3)
+            refinement_out = tf.squeeze(refinement_out, axis=3)
+            self.refinement_prediction = refinement_out
 
-        self.sess.run(tf.variables_initializer(tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope='refinement')))
+
+        self.sess.run(
+            tf.variables_initializer(tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope='refinement')))
 
         with tf.variable_scope("metrics"):
             score_metric_prediction = tf.where(self.score_predictions > 0.0,
                                                tf.ones_like(self.score_predictions),
                                                -tf.ones_like(self.score_predictions))
-            self.score_accuracy_metric, self.score_accuracy_update = tf.metrics.accuracy(self.it_next['score'],
+            self.score_accuracy_metric, self.score_accuracy_update = tf.metrics.accuracy(self.score_target,
                                                                                          score_metric_prediction)
 
-            mask_indices = tf.where(self.it_next['score'] > 0)
-            seg_metric_prediction = tf.gather(self.seg_predictions, mask_indices)
-            seg_metric_prediction = tf.where(seg_metric_prediction > 0.0, tf.ones_like(seg_metric_prediction),
-                                             tf.zeros_like(seg_metric_prediction))
-            seg_mask = tf.gather(self.it_next['mask'], mask_indices)
-            seg_mask = tf.where(seg_mask > 0, tf.ones_like(seg_mask), tf.zeros_like(seg_mask))
-            self.seg_iou_metric, self.seg_iou_update = tf.metrics.mean_iou(seg_mask, seg_metric_prediction, 2)
+            self.dm_seg_iou_metric, self.dm_seg_iou_update = self._create_seg_metrics(self.dm_seg_prediction)
+            self.sm_seg_iou_metric, self.sm_seg_iou_update = self._create_seg_metrics(
+                self.refinement_prediction)
 
         self.saver = tf.train.Saver()
 
     def restore(self):
         self.saver.restore(self.sess, self.checkpoint_file)
+
+    def fit_deepmask(self, epochs=25, lr=0.001, score_factor=1.0 / 32, weight_decay=0.00005):
+        with tf.variable_scope("deepmask_training"):
+            score_loss, segmentation_loss = self._binary_regression_loss(self.dm_seg_prediction,
+                                                                         score_factor=score_factor)
+
+            lr_var = tf.constant(lr)  # tf.train.inverse_time_decay(lr, global_step, 1,weight_decay)
+            weight_loss, weight_vars = self._weight_decay()
+            weight_decay_opt = tf.train.GradientDescentOptimizer(learning_rate=weight_decay)
+            weight_decay_opt_op = weight_decay_opt.minimize(weight_loss, var_list=weight_vars)
+            opt = tf.train.MomentumOptimizer(learning_rate=lr_var, momentum=0.9, use_nesterov=True)
+            opt_op = opt.minimize(segmentation_loss+score_loss)
+
+        self.sess.run(
+            tf.variables_initializer(tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope='deepmask_training')))
+
+        self._fit_cycle(epochs, lr_var,
+                        progress_ops_dict={'segmentation_loss': segmentation_loss, 'score_loss': score_loss,
+                                           'segmentation_iou': self.dm_seg_iou_metric,
+                                           'score_accuracy': self.score_accuracy_metric},
+                        opt_ops=[opt_op, weight_decay_opt_op],
+                        metric_update_ops=[self.dm_seg_iou_update, self.score_accuracy_update])
+
+        print('Deep mask fit cycle completed')
+
+    def fit_sharpmask(self, epochs=25, lr=0.001, weight_decay=0.00005):
+        with tf.variable_scope("sharpmask_training"):
+            _, segmentation_loss = self._binary_regression_loss(self.refinement_prediction)
+
+            global_step = tf.Variable(initial_value=0)
+            lr_var = tf.constant(lr)
+
+            segmentation_opt = tf.train.MomentumOptimizer(learning_rate=lr_var, momentum=0.9, use_nesterov=True)
+            segmentation_opt_op = segmentation_opt.minimize(segmentation_loss, global_step=global_step,
+                                                            var_list=tf.get_collection(
+                                                                key=tf.GraphKeys.GLOBAL_VARIABLES,
+                                                                scope='refinement'))
+
+        self.sess.run(
+            tf.variables_initializer(tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope='sharpmask_training')))
+
+        self._fit_cycle(epochs, lr_var,
+                        progress_ops_dict={'segmentation_loss': segmentation_loss,
+                                           'segmentation_iou': self.sm_seg_iou_metric},
+                        opt_ops=[segmentation_opt_op],
+                        metric_update_ops=[self.sm_seg_iou_update])
+
+        print('Sharp mask fit cycle completed')
+
+    def deepmask_validation(self):
+        self._run_validation({'segmentation_iou': self.dm_seg_iou_metric, 'score_accuracy': self.score_accuracy_metric},
+                             metric_update_ops=[self.dm_seg_iou_update, self.score_accuracy_update])
+
+    def sharpmask_validation(self):
+        self._run_validation({'segmentation_iou': self.sm_seg_iou_metric},
+                             metric_update_ops=[self.sm_seg_iou_update])
+
+    def eval_sharpmask(self, eval_source, eval_target):
+        self._eval_prediction(eval_source, eval_target, self.refinement_prediction)
+
+    def eval_deepmask(self, eval_source, eval_target):
+        self._eval_prediction(eval_source, eval_target, self.dm_seg_prediction)
+
+    def _create_seg_metrics(self, seg_predictions):
+        mask_indices = tf.where(self.score_target > 0)
+        seg_metric_prediction = tf.gather(seg_predictions, mask_indices)
+        seg_metric_prediction = tf.where(seg_metric_prediction > 0.0, tf.ones_like(seg_metric_prediction),
+                                         tf.zeros_like(seg_metric_prediction))
+        seg_mask = tf.gather(self.seg_target, mask_indices)
+        seg_mask = tf.where(seg_mask > 0, tf.ones_like(seg_mask), tf.zeros_like(seg_mask))
+        return tf.metrics.mean_iou(seg_mask, seg_metric_prediction, 2)
+
+    def _eval_prediction(self, eval_source, eval_target, seg_predictions, threshold=-1.0):
+        self.sess.run([self.placeholder_init_op],
+                      feed_dict={self.image_placeholder: eval_source, self.training_mode: False})
+        score_predictions, seg_predictions = self.sess.run([self.score_predictions, seg_predictions])
+
+        print('Predicted score is {}'.format(score_predictions[0]))
+
+        eval_image = io.imread(eval_source)
+        mask = np.where(seg_predictions[0] > threshold, 255, 0)
+        mask = np.expand_dims(mask, axis=2).astype(np.uint8)
+        mask = cv2.resize(mask, (eval_image.shape[1], eval_image.shape[0]))
+        mask = Image.fromarray(mask)
+        mask = mask.convert('RGB')
+
+        eval_image = Image.fromarray(eval_image)
+        eval_image = eval_image.convert('RGB')
+
+        target_img = Image.blend(eval_image, mask, 0.5)
+        target_img.save(eval_target)
+
+        print('Image with the mask applied stored at {}'.format(eval_target))
+
+    def _eval_resnet(self, eval_source):
+        self.sess.run([self.placeholder_init_op], feed_dict={self.image_placeholder: eval_source})
+        prediction = self.sess.run([self.resnet_output])
+        return IM_CLASSES[np.argmax(prediction[0])]
 
     def _create_dataset(self, data_path, batch_size):
         tfrecord_files = glob.glob(os.path.join(data_path, '*.tfrecord'))
@@ -199,46 +309,25 @@ class SharpMask(resnet_model.Model):
 
         return dataset
 
-    def binary_regression_loss(self, score_factor=1.0 / 32):
-        score_target = self.it_next['score']
-        mask_target = tf.cast(self.it_next['mask'], tf.float32)
+    def _binary_regression_loss(self, seg_predictions, score_factor=1.0 / 32):
+        mask_target = tf.cast(self.seg_target, tf.float32)
         segmentation_loss = tf.reduce_mean(
-            (1.0 + score_target) / 2.0 * tf.reduce_mean(tf.log(1.0 + tf.exp(-self.seg_predictions * mask_target)),
-                                                        axis=[1, 2]))
-        score_loss = tf.reduce_mean(tf.log(1.0 + tf.exp(-score_target * self.score_predictions))) * score_factor
+            (1.0 + self.score_target) / 2.0 * tf.reduce_mean(tf.log(1.0 + tf.exp(-seg_predictions * mask_target)),
+                                                             axis=[1, 2]))
+        score_loss = tf.reduce_mean(tf.log(1.0 + tf.exp(-self.score_target * self.score_predictions))) * score_factor
         return score_loss, segmentation_loss
 
-    def fit_sharpmask(self, epochs=75, lr=0.001, weight_decay=0.00005):
-        with tf.variable_scope("sharpmask_training"):
-            _, segmentation_loss = self.binary_regression_loss()
+    def _weight_decay(self, scopes=['deepmask_trunk', 'segmentation_branch', 'score_branch']):
+        weights = list(itertools.chain(*[tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope=scope) for scope in scopes]))
+        weights = list(filter(lambda x: 'kernel' in x.name, weights))
+        weights_norm = tf.reduce_sum(input_tensor=tf.stack([tf.nn.l2_loss(i) for i in weights]),
+                                     name='weights_norm')
 
-            global_step = tf.Variable(initial_value=0)
-            lr_var = lr / (1 + weight_decay * global_step)
-            segmentation_opt = tf.train.MomentumOptimizer(learning_rate=lr_var, momentum=0.9, use_nesterov=True)
-            segmentation_opt_op = segmentation_opt.minimize(segmentation_loss, global_step=global_step,
-                                                            var_list=tf.get_collection(
-                                                                key=tf.GraphKeys.GLOBAL_VARIABLES,
-                                                                scope='score_branch'))
+        return weights_norm, weights
 
-        self.sess.run(
-            tf.variables_initializer(tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope='sharpmask_training')))
-
-        self._fit_cycle(epochs, lr_var,
-                        progress_ops_dict={'segmentation_loss': segmentation_loss,
-                                           'segmentation_iou': self.seg_iou_metric},
-                        opt_ops=[segmentation_opt_op],
-                        metric_update_ops=[self.seg_iou_update])
-
-        print('Sharp mask fit cycle completed')
-
-    def run_validation(self, progress_ops_dict, metric_update_ops, validation_steps_count=None):
-        if progress_ops_dict is not None:
-            progress_ops_names, progress_ops = zip(*progress_ops_dict.items())
-            progress_ops = list(progress_ops)
-        else:
-            progress_ops_names = ['segmentation_iou', 'score_accuracy']
-            progress_ops = [self.seg_iou_metric, self.score_accuracy_metric]
-            metric_update_ops = [self.seg_iou_update, self.score_accuracy_update]
+    def _run_validation(self, progress_ops_dict, metric_update_ops, validation_steps_count=None):
+        progress_ops_names, progress_ops = zip(*progress_ops_dict.items())
+        progress_ops = list(progress_ops)
 
         validation_ops = metric_update_ops + progress_ops
 
@@ -250,7 +339,6 @@ class SharpMask(resnet_model.Model):
 
         while True:
             try:
-                # res = self.sess.run([score_loss, segmentation_loss, self.score_accuracy_update, self.seg_iou_update, self.score_accuracy_metric, self.seg_iou_metric], feed_dict={self.training_mode: False})
                 progress = self.sess.run(validation_ops, feed_dict={self.training_mode: False})[-len(progress_ops):]
                 counter += 1
                 pbar.update()
@@ -282,7 +370,6 @@ class SharpMask(resnet_model.Model):
 
             while True:
                 try:
-                    # res = self.sess.run([score_loss, segmentation_loss, opt_op, self.score_accuracy_update, self.seg_iou_update, self.score_accuracy_metric, self.seg_iou_metric])
                     progress = self.sess.run(training_ops)[-len(progress_ops):]
                     pbar.update()
                     pbar.set_description('Training ({})'.format(
@@ -292,7 +379,7 @@ class SharpMask(resnet_model.Model):
                     break
 
             del pbar
-            validation_results = self.run_validation(progress_ops_dict, metric_update_ops, validation_steps_per_epoch)
+            validation_results = self._run_validation(progress_ops_dict, metric_update_ops, validation_steps_per_epoch)
             training_report = ', '.join(
                 ['Training {}={}'.format(name, val) for name, val in zip(progress_ops_names, progress)])
             validation_report = ', '.join(
@@ -303,107 +390,3 @@ class SharpMask(resnet_model.Model):
             toc = datetime.datetime.now()
             tqdm.write(
                 "----- Epoch {} finished in {} -- {}. {}".format(e + 1, toc - tic, training_report, validation_report))
-
-    def fit_deepmask(self, epochs=300, lr=0.001, score_factor=1.0 / 32, weight_decay=0.00005):
-        with tf.variable_scope("deepmask_training"):
-            score_loss, segmentation_loss = self.binary_regression_loss(score_factor=score_factor)
-
-            global_step = tf.Variable(initial_value=0.0)
-            lr_var = tf.train.inverse_time_decay(lr, global_step, 1, weight_decay)#lr / (1.0 + weight_decay * global_step)#
-            segmentation_opt = tf.train.MomentumOptimizer(learning_rate=lr_var, momentum=0.9, use_nesterov=True)
-            segmentation_gvs = segmentation_opt.compute_gradients(segmentation_loss)
-            # gradients, variables = zip(*segmentation_gvs)
-            # gradients, _ = tf.clip_by_global_norm(gradients, 5.0)
-            # segmentation_opt_op = segmentation_opt.apply_gradients(zip(gradients, variables))
-            segmentation_opt_op = segmentation_opt.apply_gradients([(tf.clip_by_value(g, -1.0, 1.0)
-                                                                     if g is not None else g, v)
-                                                                    for g, v in segmentation_gvs],
-                                                                   global_step=global_step)
-
-            score_opt = tf.train.MomentumOptimizer(learning_rate=lr_var, momentum=0.9, use_nesterov=True)
-            score_gvs = score_opt.compute_gradients(score_loss, tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES,
-                                                                                  scope='score_branch'))
-            score_opt_op = score_opt.apply_gradients(
-                [(tf.clip_by_value(g, -1.0, 1.0) if g is not None else g, v) for g, v in score_gvs])
-
-        self.sess.run(
-            tf.variables_initializer(tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope='deepmask_training')))
-
-        self._fit_cycle(epochs, lr_var,
-                        progress_ops_dict={'segmentation_loss': segmentation_loss, 'score_loss': score_loss,
-                                           'segmentation_iou': self.seg_iou_metric,
-                                           'score_accuracy': self.score_accuracy_metric},
-                        opt_ops=[segmentation_opt_op, score_opt_op],
-                        metric_update_ops=[self.seg_iou_update, self.score_accuracy_update])
-
-        print('Deep mask fit cycle completed')
-
-    def eval(self, image_path):
-        image = io.imread(image_path)
-        image1 = cv2.resize(image, (224, 224)).astype(np.float32)
-        eval_dataset = tf.data.Dataset.from_tensor_slices(np.array([image_path]))
-        eval_dataset = eval_dataset.map(validation_ds)
-        init = self.iterator.make_initializer(eval_dataset)
-        self.sess.run([init])
-        score_predictions, seg_predictions = self.sess.run([self.score_predictions, self.seg_predictions])
-        seg_predictions = seg_predictions[0]
-        mask = np.where(seg_predictions > -1, 255, 0)
-        mask = np.expand_dims(mask, axis=2).astype(np.uint8)
-        mask = cv2.resize(mask, (image.shape[1], image.shape[0]))
-        mask = Image.fromarray(mask)
-        image = Image.fromarray(image)
-        mask = mask.convert('RGBA')
-        image = image.convert('RGBA')
-        new_img = Image.blend(image, mask, 0.5)
-
-        new_img.save("file.png")
-        print(seg_predictions)
-
-    def eval_resnet(self, image_path):
-        eval_dataset = tf.data.Dataset.from_tensor_slices(np.array([image_path]))
-        eval_dataset = eval_dataset.map(validation_ds)
-        init = self.iterator.make_initializer(eval_dataset)
-        self.sess.run([init])
-        prediction = self.sess.run([self.resnet_output])
-        print(IM_CLASSES[np.argmax(prediction[0])])
-
-    def eval1(self, image_path):
-        image = io.imread(image_path)
-        image = cv2.resize(image, (224, 224)).astype(np.float32)
-        eval_dataset = tf.data.Dataset.from_tensor_slices(np.array([image]))
-        eval_dataset = eval_dataset.map(validation_ds)
-        init = self.iterator.make_initializer(eval_dataset)
-        self.sess.run([init])
-        res = self.sess.run([self.resnet_output])
-        print(IM_CLASSES[np.argmax(res[0])])
-
-
-def main(eval=False):
-    if eval:
-        # dm = SharpMask(train_path='D:/data/coco/tfrecord', validation_path='D:/data/coco/tfrecord_val',
-        #                resnet_ckpt="D:\\data\\coco\\resnet_chk\\model.ckpt-250200", summary_path="./summary", checkpoint_path='D:/data/coco/sm_model')
-        dm = SharpMask(train_path='D:/data/coco/tfrecord', validation_path='D:/data/coco/tfrecord_val',
-                       resnet_ckpt="D:\\data\\coco\\resnet_chk\\model.ckpt-250200", summary_path="./summary",
-                       checkpoint_path='D:/data/coco/sm_model')
-        # dm.restore()
-        # dm.eval('E:\\data\\ml\\coco\\images\\val2017\\000000001584.jpg')
-        # dm.eval_resnet('bear.jpg')
-        # dm.eval('E:\\data\\ml\\coco\\images\\val2017\\000000000785.jpg')
-        # dm.eval('E:\\data\\ml\\coco\\images\\val2017\\000000000285.jpg')
-        # dm.eval('E:\\data\\ml\\coco\\images\\val2017\\000000007784.jpg')
-
-        # dm.eval('nig.jpg')
-    else:
-        dm = SharpMask(train_path='E:/data/ml/coco/tfrecord_224', validation_path='E:/data/ml/coco/tfrecord_val_224',
-                       resnet_ckpt="E:\\data\\ml\\coco\\resnet_chk\\model.ckpt-250200", summary_path="./summary",
-                       checkpoint_path="E:/data/ml/coco/sm_dump")
-        # dm = SharpMask(train_path='D:/data/coco/tfrecord_val_224', validation_path='D:/data/coco/tfrecord_val_224',
-        #               resnet_ckpt="D:\\data\\coco\\resnet_chk\\model.ckpt-250200", summary_path="./summary", checkpoint_path="D:/data/coco/sm_dump")
-        dm.restore()
-        # dm.eval_resnet('test_images/bear.jpg')
-
-        dm.fit_deepmask()
-
-
-if __name__ == "__main__":
-    sys.exit(main())
