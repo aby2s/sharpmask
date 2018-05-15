@@ -167,7 +167,7 @@ class SharpMask(resnet_model.Model):
         self.sess.run(
             tf.variables_initializer(tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope='score_branch')))
 
-        self.saver = tf.train.Saver()
+        #self.saver = tf.train.Saver()
 
         with tf.variable_scope("refinement"):
             channel_axis = 1 if self.data_format == "channels_first" else 3
@@ -213,12 +213,12 @@ class SharpMask(resnet_model.Model):
             self.sm_seg_iou_metric, self.sm_seg_iou_update = self._create_seg_metrics(
                 self.refinement_prediction)
 
-
+        self.saver = tf.train.Saver()
 
     def restore(self):
         self.saver.restore(self.sess, self.checkpoint_file)
 
-    def fit_deepmask(self, epochs=300, lr=0.001, score_factor=1.0 / 32, weight_decay=0.00005):
+    def fit_deepmask(self, epochs=100, lr=0.001, score_factor=1.0 / 32, weight_decay=0.00005):
         with tf.variable_scope("deepmask_training"):
             score_loss, segmentation_loss = self._binary_regression_loss(self.dm_seg_prediction,
                                                                          score_factor=score_factor)
@@ -229,20 +229,20 @@ class SharpMask(resnet_model.Model):
             weight_decay_opt = tf.train.GradientDescentOptimizer(learning_rate=weight_decay)
             weight_decay_opt_op = weight_decay_opt.minimize(weight_loss, var_list=weight_vars)
             segmentation_opt = tf.train.MomentumOptimizer(learning_rate=lr_var, momentum=0.9, use_nesterov=True)
-            segmentation_gvs = segmentation_opt.compute_gradients(segmentation_loss)
+            #segmentation_gvs = segmentation_opt.compute_gradients(segmentation_loss)
             # gradients, variables = zip(*segmentation_gvs)
             # gradients, _ = tf.clip_by_global_norm(gradients, 5.0)
-            # segmentation_opt_op = segmentation_opt.apply_gradients(zip(gradients, variables))
-            segmentation_opt_op = segmentation_opt.apply_gradients([(tf.clip_by_value(g, -1.0, 1.0)
-                                                                     if g is not None else g, v)
-                                                                    for g, v in segmentation_gvs],
-                                                                   global_step=global_step)
+            segmentation_opt_op = segmentation_opt.minimize(segmentation_loss+score_loss)
+            # segmentation_opt_op = segmentation_opt.apply_gradients([(tf.clip_by_value(g, -1.0, 1.0)
+            #                                                          if g is not None else g, v)
+            #                                                         for g, v in segmentation_gvs],
+            #                                                        global_step=global_step)
 
-            score_opt = tf.train.MomentumOptimizer(learning_rate=lr_var, momentum=0.9, use_nesterov=True)
-            score_gvs = score_opt.compute_gradients(score_loss, tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES,
-                                                                                  scope='score_branch'))
-            score_opt_op = score_opt.apply_gradients(
-                [(tf.clip_by_value(g, -1.0, 1.0) if g is not None else g, v) for g, v in score_gvs])
+            # score_opt = tf.train.MomentumOptimizer(learning_rate=lr_var, momentum=0.9, use_nesterov=True)
+            # score_gvs = score_opt.compute_gradients(score_loss, tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES,
+            #                                                                       scope='score_branch'))
+            # score_opt_op = score_opt.apply_gradients(
+            #     [(tf.clip_by_value(g, -1.0, 1.0) if g is not None else g, v) for g, v in score_gvs])
 
         self.sess.run(
             tf.variables_initializer(tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope='deepmask_training')))
@@ -251,7 +251,8 @@ class SharpMask(resnet_model.Model):
                         progress_ops_dict={'segmentation_loss': segmentation_loss, 'score_loss': score_loss,
                                            'segmentation_iou': self.dm_seg_iou_metric,
                                            'score_accuracy': self.score_accuracy_metric},
-                        opt_ops=[segmentation_opt_op, score_opt_op, weight_decay_opt_op],
+                        #opt_ops=[segmentation_opt_op, score_opt_op, weight_decay_opt_op],
+                        opt_ops=[segmentation_opt_op, weight_decay_opt_op],
                         metric_update_ops=[self.dm_seg_iou_update, self.score_accuracy_update])
 
         print('Deep mask fit cycle completed')
@@ -305,7 +306,7 @@ class SharpMask(resnet_model.Model):
         seg_mask = tf.where(seg_mask > 0, tf.ones_like(seg_mask), tf.zeros_like(seg_mask))
         return tf.metrics.mean_iou(seg_mask, seg_metric_prediction, 2)
 
-    def _eval_prediction(self, eval_source, eval_target, seg_predictions, threshold=-10.0):
+    def _eval_prediction(self, eval_source, eval_target, seg_predictions, threshold=-1.0):
         self.sess.run([self.placeholder_init_op],
                       feed_dict={self.image_placeholder: eval_source, self.training_mode: False})
         score_predictions, seg_predictions = self.sess.run([self.score_predictions, seg_predictions])
