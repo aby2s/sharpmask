@@ -5,7 +5,7 @@ DeepMask [1] and SharpMask [2] implementation on Python/TensorFlow.
 Introduction
 ------------
 The repository contains an implementation of DeepMask and SharpMask models. 
-DeepMask model predicts class agnostic object mask and object score which is positive if an object is centered and fully contained in an image. SharpMask is an extension of DeepMask architecture, which uses 
+DeepMask model predicts class agnostic object mask and object score, which is positive if an object is centered and fully contained in an image. SharpMask is an extension of DeepMask architecture, which uses 
 a top-down refinement module to compute more precise object mask proposal.
 
 The implementation is based on TensorFlow official ResNet-v2 [3] model implementation and
@@ -31,18 +31,18 @@ $COCO_PATH is any directory
     ```
     where $TRAIN_PATH and $VAL_PATH are directories to store training and validation tfrecord files respectivly.
      
-Now you are either to evaluate a pre-trained model or to train your one.
+Now you are ready either to evaluate a pre-trained model or to train your one.
 
 Training
 -------- 
 1. Download ResNet pre-trained weights from [here](http://download.tensorflow.org/models/official/resnet_v2_imagenet_checkpoint.tar.gz "TensorFlow ResNet-v2 checkpoint")
 2. Run to train DeepMask and SharpMask sequentially
     ```bash
-    python run_model.py --model all --train --train_path $TRAIN_PATH --validation_path $VAL_PATH  --summary_path $SUMMARY_PATH --checkpoint_path $CKPT_PATH
+    python run_model.py --model all --train --train_path $TRAIN_PATH --validation_path $VAL_PATH  --summary_path $SUMMARY_PATH --checkpoint_path $CKPT_PATH --resnet_ckpt $RESNET_CKPT_PATH
     ```
 3. To train only DeepMask run
     ```bash
-    python run_model.py --model deepmask --train --train_path $TRAIN_PATH --validation_path $VAL_PATH  --summary_path $SUMMARY_PATH --checkpoint_path $CKPT_PATH
+    python run_model.py --model deepmask --train --train_path $TRAIN_PATH --validation_path $VAL_PATH  --summary_path $SUMMARY_PATH --checkpoint_path $CKPT_PATH --resnet_ckpt $RESNET_CKPT_PATH
     ```
 4. To continue training or to train sharpmask from pre-trained deepmask use --restore flag
     ```bash
@@ -60,11 +60,9 @@ Evaluation
     python run_model.py --model sharpmask --restore --evaluate --eval_source $EVAL_SOURCE --eval_target $EVAL_TARGET  --summary_path $SUMMARY_PATH --checkpoint_path $CKPT_PATH
     ```
 
-Examples
-----------
-
 Pre-trained weights
 ------------------
+Pre-trained weights are available [here](https://drive.google.com/file/d/1MJBZxXimIqXIGot0h7nx9wmET0PfNLPN/view?usp=sharing)
 
 [1]: https://arxiv.org/abs/1603.08695 "Pedro O. Pinheiro et al.: Learning to Segment Object Candidates"
 [2]: https://arxiv.org/abs/1506.06204 "Pedro O. Pinheiro et al.: Learning to Refine Object Segments"
