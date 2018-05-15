@@ -18,7 +18,6 @@ IMAGENET_MEANS = tf.constant([123.68, 116.779, 103.939], dtype=tf.float32, shape
 
 
 def transform_image(image):
-    #image = tf.string_join([tf.constant('D:/data/coco/images/val2017/'), tf.substr(image, 31, 16)])
     image = tf.image.resize_images(tf.image.decode_jpeg(tf.read_file(image), channels=3, dct_method='INTEGER_ACCURATE'),
                                    size=(224, 224))
     return image - IMAGENET_MEANS
@@ -71,19 +70,9 @@ class SharpMask(resnet_model.Model):
 
         self.image_placeholder = tf.placeholder_with_default("", shape=())
 
-        # def placeholder_image():
-        #     return
-        #
-        # def iterator_image():
-        #     return self.iterator['image']
-
-        self.image_input = self.iterator[
-            'image']  # tf.Variable(tf.zeros(self.shapes['image']), validate_shape=True, dtype=self.types['image'], expected_shape=self.shapes['image'], trainable=False)
-        self.score_target = self.iterator[
-            'score']  # tf.placeholder(self.types['score'], self.shapes['score'])#tf.Variable(self.iterator['score'], validate_shape=False, dtype=self.types['score'], expected_shape=self.shapes['score'], trainable=False)
-        self.seg_target = self.iterator[
-            'mask']  # tf.placeholder(self.types['mask'], self.shapes['mask'])#tf.Variable(self.iterator['mask'], validate_shape=False, dtype=self.types['mask'], expected_shape=self.shapes['mask'], trainable=False)
-        # self.seg_predictions = tf.placeholder(tf.float32, self.shapes['mask'])
+        self.image_input = self.iterator['image']
+        self.score_target = self.iterator['score']
+        self.seg_target = self.iterator['mask']
 
         self.score_placeholder = tf.placeholder_with_default([1.0], (1,))
         self.mask_placeholder = tf.placeholder_with_default(tf.ones((1, self.mask_size, self.mask_size), dtype=tf.int8),
@@ -122,13 +111,9 @@ class SharpMask(resnet_model.Model):
 
         self.training_mode = tf.placeholder_with_default(True, shape=())
 
-        # trunk = self.block_layers[-1]
-
         with tf.variable_scope("deepmask_trunk"):
-            # trunk = tf.layers.conv2d(self.block_layers[-1], 2048, (1, 1), activation=tf.nn.relu)
             trunk = tf.layers.conv2d(self.block_layers[-1], 512, (1, 1), activation=tf.nn.relu,
                                      data_format=self.data_format)
-            M = trunk
             trunk = tf.layers.flatten(trunk)
             trunk = tf.layers.dense(trunk, 512)
         self.sess.run(
@@ -139,13 +124,6 @@ class SharpMask(resnet_model.Model):
             seg_predictions = tf.reshape(seg_predictions, [-1, 56, 56, 1])
             self.dm_seg_prediction = tf.squeeze(tf.image.resize_bilinear(seg_predictions, [224, 224]), 3)
 
-            # seg_predictions = tf.layers.conv2d(trunk, 512, (1, 1), activation=tf.nn.relu, data_format=self.data_format)
-            # seg_predictions = tf.layers.flatten(seg_predictions)
-            # seg_predictions = tf.layers.dense(seg_predictions, 512)
-            # seg_predictions = tf.layers.dense(seg_predictions, self.mask_size * self.mask_size)
-            # seg_predictions = tf.reshape(seg_predictions, [-1, self.mask_size, self.mask_size, 1])
-            # self.seg_predictions = tf.squeeze(tf.image.resize_bilinear(seg_predictions, [224, 224]), 3)
-
         self.sess.run(
             tf.variables_initializer(tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope='segmentation_branch')))
 
@@ -155,32 +133,38 @@ class SharpMask(resnet_model.Model):
             score_predictions = tf.layers.dropout(score_predictions, rate=0.5, training=self.training_mode)
             self.score_predictions = tf.layers.dense(score_predictions, 1, name='score_out')
 
-            # score_predictions = tf.layers.max_pooling2d(trunk, padding='SAME', pool_size=(2, 2), strides=(2, 2))
-            # score_predictions = tf.layers.flatten(score_predictions)
-            # score_predictions = tf.layers.dense(score_predictions, 512, activation=tf.nn.relu)
-            # score_predictions = tf.layers.dropout(score_predictions, rate=0.5, training=self.training_mode)
-            #
-            # score_predictions = tf.layers.dense(score_predictions, 1024, activation=tf.nn.relu)
-            # score_predictions = tf.layers.dropout(score_predictions, rate=0.5, training=self.training_mode)
-            # self.score_predictions = tf.layers.dense(score_predictions, 1, name='score_out')
-
         self.sess.run(
             tf.variables_initializer(tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope='score_branch')))
 
         #self.saver = tf.train.Saver()
 
+        k = 32
         with tf.variable_scope("refinement"):
-            channel_axis = 1 if self.data_format == "channels_first" else 3
-            # height_axis, width_axis = (2, 3) if self.data_format == "channels_first" else (1, 2)
-            #M = None
-            for i in range(4, 0, -1):
-                F = self.block_layers[i - 1]
-                S = tf.layers.conv2d(F, int(int(F.shape[channel_axis]) / 2), (3, 3), padding='SAME',
+            M = tf.layers.dense(trunk, k*7*7, name='vertical_0')
+            M = tf.reshape(M, [-1, k, 7, 7]) if self.data_format == "channels_first" else tf.reshape(M, [-1, 7, 7, k])
+
+            for i in range(1, 5):
+                ki = int(k/2**(i-1))
+                knext = int(ki/2)
+
+                F = self.block_layers[4-i]
+                S = tf.layers.conv2d(F, 64 if i < 4 else 32, (3, 3), padding='SAME',
                                      activation=tf.nn.relu, data_format=self.data_format,
-                                     name='horizontal_1_{}'.format(i))
-                M = tf.concat((M, S), axis=channel_axis) #if M is not None else S
-                M = tf.layers.conv2d(M, S.shape[channel_axis], (3, 3), padding='SAME', activation=tf.nn.relu,
-                                     data_format=self.data_format, name='horizontal_2_{}'.format(i))
+                                     name='horizontal_{}_64'.format(i))
+
+                S = tf.layers.conv2d(S, ki, (3, 3), padding='SAME',
+                                     activation=tf.nn.relu, data_format=self.data_format,
+                                     name='horizontal_{}_{}'.format(i, ki))
+                S = tf.layers.conv2d(S, knext, (3, 3), padding='SAME', data_format=self.data_format,
+                                     name='horizontal_{}_{}'.format(i, knext))
+
+                M = tf.layers.conv2d(M, k/2**(i-1), (3, 3), padding='SAME',
+                                     activation=tf.nn.relu, data_format=self.data_format,
+                                     name='vertical_{}_{}'.format(i, ki))
+                M = tf.layers.conv2d(M, knext, (3, 3), padding='SAME', data_format=self.data_format,
+                                     name='vertical_{}_{}'.format(i, knext))
+
+                M = tf.nn.relu(S + M)
                 if self.data_format == "channels_first":
                     M = tf.transpose(M, perm=[0, 2, 3, 1])
                     M = tf.image.resize_bilinear(M, [M.shape[1] * 2, M.shape[2] * 2])
@@ -188,15 +172,15 @@ class SharpMask(resnet_model.Model):
                 else:
                     M = tf.image.resize_bilinear(M, [M.shape[1] * 2, M.shape[2] * 2])
 
-            refinement_out = tf.layers.conv2d(M, 1, (3, 3), padding='SAME', activation=tf.nn.relu,
-                                              data_format=self.data_format, name='final_refinement')
+            refinement_out = tf.layers.conv2d(M, 1, (3, 3), padding='SAME',
+                                              data_format=self.data_format, name='refinement_out')
             if self.data_format == "channels_first":
                 refinement_out = tf.transpose(refinement_out, perm=[0, 2, 3, 1])
 
             refinement_out = tf.image.resize_bilinear(refinement_out,
                                                       [refinement_out.shape[1] * 2, refinement_out.shape[2] * 2])
             refinement_out = tf.squeeze(refinement_out, axis=3)
-            self.refinement_prediction = self.dm_seg_prediction + refinement_out
+            self.refinement_prediction = refinement_out
 
 
         self.sess.run(
@@ -218,31 +202,17 @@ class SharpMask(resnet_model.Model):
     def restore(self):
         self.saver.restore(self.sess, self.checkpoint_file)
 
-    def fit_deepmask(self, epochs=100, lr=0.001, score_factor=1.0 / 32, weight_decay=0.00005):
+    def fit_deepmask(self, epochs=25, lr=0.001, score_factor=1.0 / 32, weight_decay=0.00005):
         with tf.variable_scope("deepmask_training"):
             score_loss, segmentation_loss = self._binary_regression_loss(self.dm_seg_prediction,
                                                                          score_factor=score_factor)
 
-            global_step = tf.Variable(initial_value=0.0)
             lr_var = tf.constant(lr)  # tf.train.inverse_time_decay(lr, global_step, 1,weight_decay)
             weight_loss, weight_vars = self._weight_decay()
             weight_decay_opt = tf.train.GradientDescentOptimizer(learning_rate=weight_decay)
             weight_decay_opt_op = weight_decay_opt.minimize(weight_loss, var_list=weight_vars)
-            segmentation_opt = tf.train.MomentumOptimizer(learning_rate=lr_var, momentum=0.9, use_nesterov=True)
-            #segmentation_gvs = segmentation_opt.compute_gradients(segmentation_loss)
-            # gradients, variables = zip(*segmentation_gvs)
-            # gradients, _ = tf.clip_by_global_norm(gradients, 5.0)
-            segmentation_opt_op = segmentation_opt.minimize(segmentation_loss+score_loss)
-            # segmentation_opt_op = segmentation_opt.apply_gradients([(tf.clip_by_value(g, -1.0, 1.0)
-            #                                                          if g is not None else g, v)
-            #                                                         for g, v in segmentation_gvs],
-            #                                                        global_step=global_step)
-
-            # score_opt = tf.train.MomentumOptimizer(learning_rate=lr_var, momentum=0.9, use_nesterov=True)
-            # score_gvs = score_opt.compute_gradients(score_loss, tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES,
-            #                                                                       scope='score_branch'))
-            # score_opt_op = score_opt.apply_gradients(
-            #     [(tf.clip_by_value(g, -1.0, 1.0) if g is not None else g, v) for g, v in score_gvs])
+            opt = tf.train.MomentumOptimizer(learning_rate=lr_var, momentum=0.9, use_nesterov=True)
+            opt_op = opt.minimize(segmentation_loss+score_loss)
 
         self.sess.run(
             tf.variables_initializer(tf.get_collection(key=tf.GraphKeys.GLOBAL_VARIABLES, scope='deepmask_training')))
@@ -251,21 +221,18 @@ class SharpMask(resnet_model.Model):
                         progress_ops_dict={'segmentation_loss': segmentation_loss, 'score_loss': score_loss,
                                            'segmentation_iou': self.dm_seg_iou_metric,
                                            'score_accuracy': self.score_accuracy_metric},
-                        #opt_ops=[segmentation_opt_op, score_opt_op, weight_decay_opt_op],
-                        opt_ops=[segmentation_opt_op, weight_decay_opt_op],
+                        opt_ops=[opt_op, weight_decay_opt_op],
                         metric_update_ops=[self.dm_seg_iou_update, self.score_accuracy_update])
 
         print('Deep mask fit cycle completed')
 
-    def fit_sharpmask(self, epochs=300, lr=0.001, weight_decay=0.00005):
+    def fit_sharpmask(self, epochs=25, lr=0.001, weight_decay=0.00005):
         with tf.variable_scope("sharpmask_training"):
             _, segmentation_loss = self._binary_regression_loss(self.refinement_prediction)
 
             global_step = tf.Variable(initial_value=0)
-            lr_var = tf.constant(lr)  # tf.train.inverse_time_decay(lr, global_step, 1,weight_decay)
-            # weight_loss, weight_vars = self._weight_decay(scopes=['refinement'])
-            # weight_decay_opt = tf.train.GradientDescentOptimizer(learning_rate=weight_decay)
-            # weight_decay_opt_op = weight_decay_opt.minimize(weight_loss, var_list=weight_vars)
+            lr_var = tf.constant(lr)
+
             segmentation_opt = tf.train.MomentumOptimizer(learning_rate=lr_var, momentum=0.9, use_nesterov=True)
             segmentation_opt_op = segmentation_opt.minimize(segmentation_loss, global_step=global_step,
                                                             var_list=tf.get_collection(
