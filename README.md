@@ -48,7 +48,7 @@ Training
     ```bash
     python run_model.py --model sharpmask --restore --train --train_path $TRAIN_PATH --validation_path $VAL_PATH  --summary_path $SUMMARY_PATH --checkpoint_path $CKPT_PATH
     ```
-    
+
 Evaluation
 ----------
 1. To run evaluation computing mean IOU on compiled coco validation set:
@@ -62,7 +62,12 @@ Evaluation
 
 Pre-trained weights
 ------------------
-Pre-trained weights are available [here](https://drive.google.com/file/d/1MJBZxXimIqXIGot0h7nx9wmET0PfNLPN/view?usp=sharing)
+Pre-trained weights are available [here](https://drive.google.com/open?id=1o-u-8BxS_aNwgz022esOSEe4l-pvURJT)
+
+
+Example
+-------
+![Example](example.png)
 
 [1]: https://arxiv.org/abs/1603.08695 "Pedro O. Pinheiro et al.: Learning to Segment Object Candidates"
 [2]: https://arxiv.org/abs/1506.06204 "Pedro O. Pinheiro et al.: Learning to Refine Object Segments"
